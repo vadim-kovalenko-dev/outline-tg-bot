@@ -169,17 +169,35 @@ def create_vpn_key():
 def revoke_vpn_key(vpn_key_data: dict):
     key_id = vpn_key_data.get("id")
     if not key_id:
+        print("DEBUG: No key_id found in VPN key data")
         return False
-    url = f"{OUTLINE_API_URL}/access-keys/{key_id}"
+    
+    # Проверяем, не содержит ли URL уже endpoint (как в create_vpn_key)
+    if OUTLINE_API_URL.endswith('/access-keys'):
+        base_url = OUTLINE_API_URL.rstrip('/')
+    else:
+        base_url = OUTLINE_API_URL
+    
+    url = f"{base_url}/access-keys/{key_id}"
+    
     try:
-        response = requests.delete(url, verify=True, timeout=10)
+        print(f"DEBUG: Deleting VPN key with URL: {url}")
+        print(f"DEBUG: Key ID: {key_id}")
+        # Используем verify=False для игнорирования ошибок SSL (как в официальной документации)
+        response = requests.delete(url, verify=False, timeout=30)
+        print(f"DEBUG: Response status: {response.status_code}")
+        print(f"DEBUG: Response text: {response.text[:500] if response.text else 'No response text'}")
+        
         if response.status_code == 204:
+            print(f"DEBUG: Successfully deleted Outline key with ID: {key_id}")
             return True
         else:
-            print("Failed to delete Outline key:", response.status_code, response.text)
+            print(f"DEBUG: Failed to delete Outline key. Status: {response.status_code}, Response: {response.text}")
             return False
     except Exception as e:
-        print("Exception revoking Outline key:", e)
+        print(f"DEBUG: Exception revoking Outline key: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 bot = Bot(token=API_TOKEN)
@@ -499,6 +517,7 @@ async def pay_support_handler(message: types.Message):
 async def terms_handler(message: types.Message):
     await message.answer(TERMS_TEXT, parse_mode="HTML")
 
+
 @dp.callback_query(lambda c: c.data == "admin_stats")
 async def admin_stats_handler(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
@@ -518,45 +537,105 @@ async def admin_stats_handler(callback: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data == "admin_users")
 async def admin_users_handler(callback: types.CallbackQuery):
+    await show_users_page(callback.from_user.id, 0)
+
+async def show_users_page(user_id: int, page: int):
+    """Показать страницу с пользователями"""
+    users = get_all_users()
+    if not users:
+        text = "👥 Пользователи не найдены."
+        await bot.send_message(user_id, text, parse_mode="HTML")
+        return
+    
+    # Разбиваем на страницы по 10 пользователей
+    users_per_page = 10
+    total_pages = (len(users) + users_per_page - 1) // users_per_page
+    
+    if page < 0:
+        page = 0
+    if page >= total_pages:
+        page = total_pages - 1
+    
+    start_idx = page * users_per_page
+    end_idx = min(start_idx + users_per_page, len(users))
+    page_users = users[start_idx:end_idx]
+    
+    lines = []
+    for user in page_users:
+        user_id_val, username, vpn_key, ton_wallet, pending_comment, created_at, subscription_expires = user
+        
+        # Формируем кликабельное имя пользователя
+        if username and username.strip():
+            # Пользователь с username: @username как ссылка
+            user_link = f'<a href="tg://user?id={user_id_val}">@{username}</a>'
+        else:
+            # Пользователь без username: ID как ссылка
+            user_link = f'<a href="tg://user?id={user_id_val}">ID: {user_id_val}</a>'
+        
+        # Формируем информацию о подписке
+        if subscription_expires:
+            try:
+                expires = datetime.fromisoformat(subscription_expires)
+                expires_msk = utc_to_msk(expires)
+                formatted_date = expires_msk.strftime("%Y-%m-%d %H:%M:%S")
+                if expires > datetime.utcnow():
+                    active = "✅"
+                else:
+                    active = "❌"
+                subscription_info = f"📅 Подписка: {formatted_date} {active}"
+            except Exception:
+                subscription_info = "📅 Подписка: Ошибка формата"
+        else:
+            subscription_info = "📅 Подписка: Нет подписки"
+        
+        # Формируем строки для пользователя (новый формат)
+        lines.append(f"👤 {user_link}")
+        lines.append(f"🆔 ID: {user_id_val}")
+        lines.append(f"{subscription_info}")
+        lines.append("")  # Пустая строка между пользователями
+    
+    # Убираем последнюю пустую строку
+    if lines and lines[-1] == "":
+        lines.pop()
+    
+    # Добавляем заголовок с информацией о странице
+    header = f"📋 Список пользователей\nСтраница {page + 1} из {total_pages}\n\n"
+    text = header + "\n".join(lines)
+    
+    # Создаем клавиатуру с кнопками навигации
+    keyboard_buttons = []
+    
+    if total_pages > 1:
+        if page > 0:
+            keyboard_buttons.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_users_page_{page - 1}"))
+        
+        keyboard_buttons.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="admin_users_page_info"))
+        
+        if page < total_pages - 1:
+            keyboard_buttons.append(InlineKeyboardButton(text="Вперед ▶️", callback_data=f"admin_users_page_{page + 1}"))
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[keyboard_buttons]) if keyboard_buttons else None
+    
+    # Отправляем сообщение
+    await bot.send_message(user_id, text, parse_mode="HTML", reply_markup=keyboard)
+
+@dp.callback_query(lambda c: c.data.startswith("admin_users_page_"))
+async def admin_users_page_handler(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         await callback.answer("Access Denied", show_alert=True)
         return
-        
-    users = get_all_users()
-    if not users:
-        text = "Пользователи не найдены."
-    else:
-        lines = []
-        for user in users:
-            user_id, username, vpn_key, ton_wallet, pending_comment, created_at, subscription_expires = user
-            
-            if subscription_expires:
-                try:
-                    expires = datetime.fromisoformat(subscription_expires)
-                    expires_msk = utc_to_msk(expires)
-                    formatted_date = expires_msk.strftime("%Y-%m-%d %H:%M:%S")
-                    if expires > datetime.utcnow():
-                        active = "✅"
-                    else:
-                        active = "❌"
-                    line = f"ID: {user_id}, Имя: {username}, Подписка: {formatted_date} {active}"
-                except Exception:
-                    line = f"ID: {user_id}, Имя: {username}, Подписка: Ошибка формата"
-            else:
-                line = f"ID: {user_id}, Имя: {username}, Подписка: Нет подписки"
-            lines.append(line)
-            
-        text = "\n".join(lines)
-        
-    await callback.answer()
     
-    max_message_length = 4096
-    if len(text) <= max_message_length:
-        await bot.send_message(callback.from_user.id, text)
-    else:
-        chunks = [text[i:i+max_message_length] for i in range(0, len(text), max_message_length)]
-        for chunk in chunks:
-            await bot.send_message(callback.from_user.id, chunk)
+    try:
+        if callback.data == "admin_users_page_info":
+            await callback.answer("Текущая страница")
+            return
+        
+        page_str = callback.data.replace("admin_users_page_", "")
+        page = int(page_str)
+        await callback.answer()
+        await show_users_page(callback.from_user.id, page)
+    except ValueError:
+        await callback.answer("Ошибка навигации", show_alert=True)
 
 @dp.callback_query(lambda c: c.data == "admin_close")
 async def admin_close_handler(callback: types.CallbackQuery):
