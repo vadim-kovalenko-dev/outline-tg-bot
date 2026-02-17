@@ -8,7 +8,7 @@ import urllib3
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery, InputFile, BufferedInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from command_texts import PRIVACY_TEXT, PAYSUPPORT_TEXT, TERMS_TEXT
@@ -18,7 +18,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 API_TOKEN = os.getenv("TG_API_KEY", "")
 OUTLINE_API_URL = os.getenv("OUTLINE_API_URL", "")
-DB_NAME = "data/vpn.db"
+DB_NAME = os.path.join(os.path.dirname(__file__), "data/vpn.db")
 PROVIDER_TOKEN = os.getenv("PROVIDER_TOKEN", "")
 admin_ids_str = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS = [int(id) for id in admin_ids_str.split(",") if admin_ids_str]
@@ -203,13 +203,26 @@ def revoke_vpn_key(vpn_key_data: dict):
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-def get_main_menu():
+def get_main_menu(user_id: int = None):
     builder = InlineKeyboardBuilder()
+    
+    # Добавляем кнопку админ-панели для администраторов
+    if user_id and user_id in ADMIN_IDS:
+        builder.button(text="👑 Админ-панель", callback_data="admin_panel")
+        builder.adjust(1)  # Отдельный ряд для админ-кнопки
+    
+    # Основные кнопки для всех пользователей
     builder.button(text="🔑 Получить VPN", callback_data="menu_get_vpn")
     builder.button(text="📖 Инструкция", callback_data="menu_info")
     builder.button(text="📊 Статус", callback_data="menu_settings")
     builder.button(text="💳 Оплата", callback_data="menu_payments")
-    builder.adjust(2)
+    
+    # Настраиваем расположение: если есть админ-кнопка, то 1+2+2, иначе просто 2+2
+    if user_id and user_id in ADMIN_IDS:
+        builder.adjust(1, 2, 2)
+    else:
+        builder.adjust(2)
+    
     return builder.as_markup()
 
 @dp.message(Command("start"))
@@ -219,7 +232,7 @@ async def start_handler(message: types.Message):
         "Этот бот позволяет получить доступ к VPN по подписке с использованием Telegram Stars.\n\n"
         "Выберите опцию ниже:"
     )
-    await message.answer(text, parse_mode="HTML", reply_markup=get_main_menu())
+    await message.answer(text, parse_mode="HTML", reply_markup=get_main_menu(message.from_user.id))
 
 @dp.callback_query(lambda c: c.data == "menu_get_vpn")
 async def menu_get_vpn(callback: types.CallbackQuery):
@@ -498,6 +511,7 @@ async def admin_panel_handler(message: types.Message):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Общая статистика", callback_data="admin_stats")],
         [InlineKeyboardButton(text="Список пользователей", callback_data="admin_users")],
+        [InlineKeyboardButton(text="📥 Скачать БД", callback_data="admin_download_db")],
         [InlineKeyboardButton(text="Закрыть", callback_data="admin_close")]
     ])
     await message.answer("Административная панель:", reply_markup=keyboard)
@@ -518,11 +532,28 @@ async def terms_handler(message: types.Message):
     await message.answer(TERMS_TEXT, parse_mode="HTML")
 
 
+@dp.callback_query(lambda c: c.data == "admin_panel")
+async def admin_panel_callback_handler(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Доступ запрещен", show_alert=True)
+        return
+        
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Общая статистика", callback_data="admin_stats")],
+        [InlineKeyboardButton(text="Список пользователей", callback_data="admin_users")],
+        [InlineKeyboardButton(text="📥 Скачать БД", callback_data="admin_download_db")],
+        [InlineKeyboardButton(text="Закрыть", callback_data="admin_close")]
+    ])
+    await callback.answer()
+    await bot.send_message(callback.from_user.id, "Административная панель:", reply_markup=keyboard)
+
 @dp.callback_query(lambda c: c.data == "admin_stats")
 async def admin_stats_handler(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         await callback.answer("Доступ запрещен", show_alert=True)
         return
+    
+    await callback.answer()  # Убрать анимацию загрузки сразу
         
     total_users = get_total_users()
     active_subs = get_active_subscriptions()
@@ -532,11 +563,11 @@ async def admin_stats_handler(callback: types.CallbackQuery):
         f"Пользователи: {total_users}\n"
         f"Активные подписки: {active_subs}"
     )
-    await callback.answer()
     await bot.send_message(callback.from_user.id, text)
 
 @dp.callback_query(lambda c: c.data == "admin_users")
 async def admin_users_handler(callback: types.CallbackQuery):
+    await callback.answer()  # Убрать анимацию загрузки
     await show_users_page(callback.from_user.id, 0)
 
 async def show_users_page(user_id: int, page: int):
@@ -636,6 +667,47 @@ async def admin_users_page_handler(callback: types.CallbackQuery):
         await show_users_page(callback.from_user.id, page)
     except ValueError:
         await callback.answer("Ошибка навигации", show_alert=True)
+
+@dp.callback_query(lambda c: c.data == "admin_download_db")
+async def admin_download_db_handler(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    await callback.answer()
+    
+    # Проверяем существование файла базы данных
+    if not os.path.exists(DB_NAME):
+        print(f"DEBUG: Файл БД не найден по пути: {DB_NAME}")
+        await bot.send_message(callback.from_user.id, "❌ Файл базы данных не найден.")
+        return
+    
+    # Создаем имя файла с текущей датой
+    current_date = datetime.now().strftime("%Y-%m-%d")
+    filename = f"vpn_backup_{current_date}.db"
+    
+    try:
+        # Проверяем размер файла для диагностики
+        file_size = os.path.getsize(DB_NAME)
+        print(f"DEBUG: Путь к файлу БД: {DB_NAME}")
+        print(f"DEBUG: Размер файла БД: {file_size} байт")
+        
+        # Читаем файл в память и отправляем через BufferedInputFile
+        with open(DB_NAME, 'rb') as db_file:
+            file_data = db_file.read()
+        
+        document = BufferedInputFile(file_data, filename=filename)
+        await bot.send_document(
+            chat_id=callback.from_user.id,
+            document=document,
+            caption=f"📁 Резервная копия базы данных\nДата: {current_date}\nРазмер: {file_size} байт"
+        )
+        print(f"DEBUG: Файл БД успешно отправлен администратору {callback.from_user.id}")
+    except Exception as e:
+        print(f"Ошибка при отправке файла базы данных: {e}")
+        import traceback
+        traceback.print_exc()  # Детальный вывод ошибки
+        await bot.send_message(callback.from_user.id, f"❌ Ошибка при отправке файла: {str(e)}")
 
 @dp.callback_query(lambda c: c.data == "admin_close")
 async def admin_close_handler(callback: types.CallbackQuery):
