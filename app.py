@@ -23,12 +23,6 @@ PROVIDER_TOKEN = os.getenv("PROVIDER_TOKEN", "")
 admin_ids_str = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS = [int(id) for id in admin_ids_str.split(",") if admin_ids_str]
 
-# Subscription prices in Telegram Stars
-PRICE_1_MONTH = int(os.getenv("PRICE_1_MONTH"))
-PRICE_3_MONTHS = int(os.getenv("PRICE_3_MONTHS"))
-PRICE_6_MONTHS = int(os.getenv("PRICE_6_MONTHS"))
-PRICE_12_MONTHS = int(os.getenv("PRICE_12_MONTHS"))
-
 # Subscription names for invoices
 SUBSCRIPTION_NAMES = {
     1: ("Подписка на VPN доступ на 1 месяц", "Подписка на 1 месяц"),
@@ -38,6 +32,64 @@ SUBSCRIPTION_NAMES = {
 }
 
 pending_invoices = {}
+# Dictionary to track admin price editing state
+admin_price_editing = {}
+
+def load_prices():
+    """Load prices from JSON file, create if doesn't exist"""
+    prices_file = os.path.join(os.path.dirname(__file__), "data/prices.json")
+    
+    # Default prices if file doesn't exist
+    default_prices = {
+        "price_1_month": 80,
+        "price_3_months": 210,
+        "price_6_months": 390,
+        "price_12_months": 720
+    }
+    
+    try:
+        if not os.path.exists(prices_file):
+            # Create directory if doesn't exist
+            os.makedirs(os.path.dirname(prices_file), exist_ok=True)
+            # Save default prices
+            with open(prices_file, 'w', encoding='utf-8') as f:
+                json.dump(default_prices, f, ensure_ascii=False, indent=2)
+            return default_prices
+        
+        # Load existing prices
+        with open(prices_file, 'r', encoding='utf-8') as f:
+            prices = json.load(f)
+            
+        # Ensure all required keys exist
+        for key, default_value in default_prices.items():
+            if key not in prices:
+                prices[key] = default_value
+                
+        # Save updated prices if keys were missing
+        with open(prices_file, 'w', encoding='utf-8') as f:
+            json.dump(prices, f, ensure_ascii=False, indent=2)
+            
+        return prices
+        
+    except Exception as e:
+        print(f"Error loading prices: {e}")
+        return default_prices
+
+def save_prices(prices):
+    """Save prices to JSON file"""
+    try:
+        prices_file = os.path.join(os.path.dirname(__file__), "data/prices.json")
+        os.makedirs(os.path.dirname(prices_file), exist_ok=True)
+        
+        with open(prices_file, 'w', encoding='utf-8') as f:
+            json.dump(prices, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"Error saving prices: {e}")
+        return False
+
+# Load prices on startup
+prices = load_prices()
 
 def utc_to_msk(utc_dt: datetime) -> datetime:
     """Конвертирует время из UTC в МСК (UTC+3)"""
@@ -284,7 +336,7 @@ async def menu_get_vpn(callback: types.CallbackQuery):
             
     expires_msk = utc_to_msk(expires)
     text = (
-        f"🔑 Ваш VPN доступ:\n<pre>{vpn_key_data.get('accessUrl')}</pre>\n\n"
+        f"🔑 Ваш VPN ключ:\n<pre>{vpn_key_data.get('accessUrl')}</pre>\n\n"
         f"Подписка действительна до {expires_msk.strftime('%Y-%m-%d %H:%M:%S')} (МСК)."
     )
     await callback.answer()
@@ -334,12 +386,15 @@ async def menu_payments(callback: types.CallbackQuery):
                 await callback.answer("У вас уже есть активная подписка. Для продления выберите срок.", show_alert=True)
         except Exception:
             pass
+    
+    # Get current prices from JSON
+    current_prices = prices
             
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"1 месяц - {PRICE_1_MONTH} ⭐", callback_data="pay_sub_1")],
-        [InlineKeyboardButton(text=f"3 месяца - {PRICE_3_MONTHS} ⭐", callback_data="pay_sub_3")],
-        [InlineKeyboardButton(text=f"6 месяцев - {PRICE_6_MONTHS} ⭐", callback_data="pay_sub_6")],
-        [InlineKeyboardButton(text=f"12 месяцев - {PRICE_12_MONTHS} ⭐", callback_data="pay_sub_12")],
+        [InlineKeyboardButton(text=f"1 месяц - {current_prices['price_1_month']} ⭐", callback_data="pay_sub_1")],
+        [InlineKeyboardButton(text=f"3 месяца - {current_prices['price_3_months']} ⭐", callback_data="pay_sub_3")],
+        [InlineKeyboardButton(text=f"6 месяцев - {current_prices['price_6_months']} ⭐", callback_data="pay_sub_6")],
+        [InlineKeyboardButton(text=f"12 месяцев - {current_prices['price_12_months']} ⭐", callback_data="pay_sub_12")],
         [InlineKeyboardButton(text="Отмена", callback_data="subscription_selection_cancel")]
     ])
     await callback.answer()
@@ -371,12 +426,16 @@ async def process_subscription_payment(callback: types.CallbackQuery):
     except ValueError:
         await callback.answer("Некорректный срок подписки.", show_alert=True)
         return
+    
+    # Get current prices from JSON
+    current_prices = prices
         
+    # Map duration to price keys
     price_mapping = {
-        1: PRICE_1_MONTH,
-        3: PRICE_3_MONTHS,
-        6: PRICE_6_MONTHS,
-        12: PRICE_12_MONTHS
+        1: current_prices['price_1_month'],
+        3: current_prices['price_3_months'],
+        6: current_prices['price_6_months'],
+        12: current_prices['price_12_months']
     }
     
     price_xtr = price_mapping.get(duration)
@@ -385,7 +444,7 @@ async def process_subscription_payment(callback: types.CallbackQuery):
         return
         
     payload = f"subscription_{duration}_{price_xtr}"
-    prices = [LabeledPrice(label=SUBSCRIPTION_NAMES[duration][1], amount=price_xtr)]
+    invoice_prices = [LabeledPrice(label=SUBSCRIPTION_NAMES[duration][1], amount=price_xtr)]
     
     kb = InlineKeyboardBuilder()
     kb.button(text=f"Оплатить {price_xtr} ⭐", pay=True)
@@ -401,7 +460,7 @@ async def process_subscription_payment(callback: types.CallbackQuery):
             payload=payload,
             provider_token=PROVIDER_TOKEN,
             currency="XTR",
-            prices=prices,
+            prices=invoice_prices,
             start_parameter="vpn_subscription",
             reply_markup=kb.as_markup()
         )
@@ -460,7 +519,25 @@ async def successful_payment_handler(message: types.Message):
         
     update_subscription(user_id, new_expiry.isoformat())
     
+    # Вычисляем время для сообщений
     new_expiry_msk = utc_to_msk(new_expiry)
+    
+    # Автоматически создаем VPN ключ, если его нет
+    user = get_user(user_id)  # Получаем актуальные данные пользователя
+    vpn_key_data = None
+    
+    # Проверяем, есть ли у пользователя VPN ключ
+    if not user[2] or user[2].strip() == '' or user[2].lower() == 'null' or user[2].lower() == 'none':
+        vpn_key_data = create_vpn_key()
+        if vpn_key_data:
+            update_vpn_key(user_id, json.dumps(vpn_key_data))
+            # Отправляем ключ отдельным сообщением
+            await bot.send_message(user_id, f"🔑 Ваш VPN ключ:\n<pre>{vpn_key_data.get('accessUrl')}</pre>", parse_mode="HTML")
+        else:
+            # Если не удалось создать ключ, сообщаем пользователю
+            await bot.send_message(user_id, "⚠️ Не удалось автоматически создать VPN ключ. Пожалуйста, нажмите кнопку '🔑 Получить VPN' в главном меню для создания ключа вручную.")
+    
+    # Отправляем сообщение об успешной оплате
     await message.answer(f"Оплата прошла успешно! Подписка продлена до {new_expiry_msk.strftime('%Y-%m-%d %H:%M:%S')} (МСК).")
 
 async def subscription_reminder():
@@ -509,8 +586,9 @@ async def admin_panel_handler(message: types.Message):
         return
         
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Общая статистика", callback_data="admin_stats")],
-        [InlineKeyboardButton(text="Список пользователей", callback_data="admin_users")],
+        [InlineKeyboardButton(text="📊 Общая статистика", callback_data="admin_stats")],
+        [InlineKeyboardButton(text="👥 Список пользователей", callback_data="admin_users")],
+        [InlineKeyboardButton(text="💰 Изменить стоимость", callback_data="admin_change_prices")],
         [InlineKeyboardButton(text="📥 Скачать БД", callback_data="admin_download_db")],
         [InlineKeyboardButton(text="Закрыть", callback_data="admin_close")]
     ])
@@ -539,8 +617,9 @@ async def admin_panel_callback_handler(callback: types.CallbackQuery):
         return
         
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Общая статистика", callback_data="admin_stats")],
-        [InlineKeyboardButton(text="Список пользователей", callback_data="admin_users")],
+        [InlineKeyboardButton(text="📊 Общая статистика", callback_data="admin_stats")],
+        [InlineKeyboardButton(text="👥 Список пользователей", callback_data="admin_users")],
+        [InlineKeyboardButton(text="💰 Изменить стоимость", callback_data="admin_change_prices")],
         [InlineKeyboardButton(text="📥 Скачать БД", callback_data="admin_download_db")],
         [InlineKeyboardButton(text="Закрыть", callback_data="admin_close")]
     ])
@@ -708,6 +787,89 @@ async def admin_download_db_handler(callback: types.CallbackQuery):
         import traceback
         traceback.print_exc()  # Детальный вывод ошибки
         await bot.send_message(callback.from_user.id, f"❌ Ошибка при отправке файла: {str(e)}")
+
+@dp.callback_query(lambda c: c.data == "admin_change_prices")
+async def admin_change_prices_handler(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    user_id = callback.from_user.id
+    admin_price_editing[user_id] = True
+    
+    await callback.answer()
+    await bot.send_message(
+        user_id,
+        "Введите стоимость подписки в формате:\n"
+        "80 210 390 720"
+    )
+
+@dp.message(F.text)
+async def handle_admin_price_input(message: types.Message):
+    user_id = message.from_user.id
+    
+    # Проверяем, является ли пользователь администратором и находится в режиме редактирования цен
+    if user_id not in ADMIN_IDS or user_id not in admin_price_editing:
+        return
+    
+    text = message.text.strip()
+    
+    # Проверяем на отмену
+    if text.lower() in ["отмена", "cancel"]:
+        admin_price_editing.pop(user_id, None)
+        await message.answer("❌ Изменение стоимости отменено.")
+        return
+    
+    # Проверяем формат: 4 числа через пробел
+    try:
+        parts = text.split()
+        if len(parts) != 4:
+            raise ValueError
+        
+        prices_list = [int(part) for part in parts]
+        
+        # Проверяем, что все числа положительные
+        for price in prices_list:
+            if price <= 0:
+                raise ValueError
+        
+    except ValueError:
+        await message.answer(
+            "❌ Неверный формат. Введите 4 числа через пробел.\n"
+            "Пример: 80 210 390 720"
+        )
+        # НЕ удаляем из admin_price_editing - оставляем в режиме редактирования
+        return
+    
+    # Создаем новый словарь цен
+    new_prices = {
+        "price_1_month": prices_list[0],
+        "price_3_months": prices_list[1],
+        "price_6_months": prices_list[2],
+        "price_12_months": prices_list[3]
+    }
+    
+    # Сохраняем в JSON
+    if save_prices(new_prices):
+        # Обновляем глобальную переменную prices
+        global prices
+        prices = new_prices
+        
+        # Удаляем из режима редактирования только при успехе
+        admin_price_editing.pop(user_id, None)
+        
+        await message.answer(
+            f"✅ Стоимость изменена:\n\n"
+            f"1 месяц - {prices_list[0]} ⭐\n"
+            f"3 месяца - {prices_list[1]} ⭐\n"
+            f"6 месяцев - {prices_list[2]} ⭐\n"
+            f"12 месяцев - {prices_list[3]} ⭐"
+        )
+    else:
+        await message.answer(
+            "❌ Ошибка при сохранении цен. Попробуйте позже."
+        )
+        # При ошибке сохранения тоже НЕ удаляем из admin_price_editing
 
 @dp.callback_query(lambda c: c.data == "admin_close")
 async def admin_close_handler(callback: types.CallbackQuery):

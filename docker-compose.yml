@@ -7,9 +7,5 @@ services:
       - OUTLINE_API_URL=${OUTLINE_API_URL}
       - ADMIN_IDS=${ADMIN_IDS}
       - PROVIDER_TOKEN=${PROVIDER_TOKEN}
-      - PRICE_1_MONTH=${PRICE_1_MONTH}
-      - PRICE_3_MONTHS=${PRICE_3_MONTHS}
-      - PRICE_6_MONTHS=${PRICE_6_MONTHS}
-      - PRICE_12_MONTHS=${PRICE_12_MONTHS}
     volumes:
       - ./data:/app/data
